@@ -1,0 +1,229 @@
+(() => {
+  try {
+    const distribution = {"installation":"6fb5331e-099e-4d7e-962b-c4f595ff72a5","version":1,"paths":{"runtime.js":"a.js","core.js":"b.js","fallback.js":"c.js","observe":"e","observe/fallback":"f","entry-decision":"g","cta-refresh":"h","observed-session":"j","observed-action":"k","html.gif":"m.gif","css.gif":"n.gif","cta-inventory.js":"p.js"},"bases":{"SCRIPT":"https://protect.leoceo.online/r/v2/86cb7a6d-0470-4d27-a445-891025b58030/","STATIC_ASSETS":"https://protect.leoceo.online/r/v2/977e0caf-f640-45f7-a09f-cffef31879f5/","TELEMETRY":"https://protect.leoceo.online/r/v2/118edce9-8025-4eb7-8a8f-40626eba8aca/"}};
+    const source = document.currentScript && document.currentScript.src;
+    if (!source) return;
+    const endpoint = path => new URL(distribution?.paths?.[path] ?? path, distribution ? distribution.bases.TELEMETRY : source).href;
+    // Explicit operator-requested inventory is available only on loopback laboratory pages.
+    if (['localhost','127.0.0.1'].includes(location.hostname)) addEventListener('message', event => {
+      try {
+        const sender = new URL(event.origin), request = event.data;
+        if (window.parent === window || event.source !== window.parent || !['localhost','127.0.0.1'].includes(sender.hostname) || !['http:','https:'].includes(sender.protocol) || !request || request.type !== 'anticlone-inventory-request' || typeof request.nonce !== 'string' || !/^[a-f0-9]{32}$/.test(request.nonce) || typeof request.surface !== 'string' || !/^[a-zA-Z0-9_-]{1,64}$/.test(request.surface)) return;
+        if (!window.confirm('Permitir captura local dos elementos desta superficie para ' + event.origin + '?')) return;
+        const script = document.createElement('script'); script.src = new URL(distribution ? (distribution.paths?.['cta-inventory.js'] ?? 'cta-inventory.js') : '/cta-inventory.js', distribution ? distribution.bases.STATIC_ASSETS : source).href;
+        script.onload = () => { try { event.source.postMessage({type:'anticlone-inventory-result',nonce:request.nonce,surface:request.surface,pathname:location.pathname,candidates:window.anticloneLabInventory(request.surface)},event.origin); } catch (_) { /* No capture on failure. */ } script.remove(); };
+        script.onerror = () => script.remove(); document.head.appendChild(script);
+      } catch (_) { /* Untrusted message. */ }
+    });
+    const deadline = performance.now() + 150;
+    // Optional owner-authored visual scope. Never infer a page-wide gate.
+    // Opacity keeps layout and native hit-testing intact during early interaction.
+    const gated = [];
+    const releaseGate = () => {
+      for (const {node,value,priority,transition,transitionPriority} of gated.splice(0)) {
+        if (node.style.getPropertyValue('opacity') === '0' && node.style.getPropertyPriority('opacity') === 'important') {
+          if (value) node.style.setProperty('opacity',value,priority); else node.style.removeProperty('opacity');
+        }
+        if (node.style.getPropertyValue('transition-property') === 'none' && node.style.getPropertyPriority('transition-property') === 'important') {
+          // Flush the restored opacity while transitions are still disabled.
+          // Otherwise the owner's CSS can turn a 150ms gate into a multi-second fade.
+          getComputedStyle(node).opacity;
+          if (transition) node.style.setProperty('transition-property',transition,transitionPriority); else node.style.removeProperty('transition-property');
+        }
+      }
+    };
+    let redirectPending = true, redirectInteracted = false, abandoned = false, suspended = false;
+    let suspendCtas = () => {}, resumeCtas = () => {}, startCore = () => {}, coreLoaded = false, coreStarted = false;
+    let initialPath = location.pathname, initialSearch = location.search;
+    const validContext = () => !abandoned && !suspended && location.pathname === initialPath && location.search === initialSearch;
+    const abandon = () => { abandoned = true; cancelRedirect(); };
+    const cancelRedirect = () => { redirectPending = false; redirectInteracted = true; releaseGate(); };
+    setTimeout(() => { redirectPending = false; releaseGate(); }, Math.max(0,deadline-performance.now()));
+    const scopes = document.querySelectorAll('[data-anticlone-render-gate]');
+    if (scopes.length <= 20) for (const node of scopes) {
+      try {
+        const declared=node.getAttribute('data-anticlone-render-gate'), owner=new URL(declared);
+        if (!(node instanceof HTMLElement) || ['HTML','BODY'].includes(node.tagName) || owner.origin !== declared || owner.origin === location.origin || !['http:','https:'].includes(location.protocol) || !(owner.protocol === 'https:' || owner.protocol === 'http:' && ['localhost','127.0.0.1'].includes(owner.hostname)) || performance.now() >= deadline) continue;
+        gated.push({node,value:node.style.getPropertyValue('opacity'),priority:node.style.getPropertyPriority('opacity'),transition:node.style.getPropertyValue('transition-property'),transitionPriority:node.style.getPropertyPriority('transition-property')});
+        node.style.setProperty('transition-property','none','important');
+        node.style.setProperty('opacity','0','important');
+      } catch (_) { /* Missing or invalid explicit scope remains visible. */ }
+    }
+    addEventListener('pagehide', event => { cancelRedirect(); if (event.persisted) { suspended = true; suspendCtas(); } else abandon(); });
+    addEventListener('pageshow', event => { if (event.persisted && suspended && !abandoned) { suspended = false; if (validContext()) { if (coreStarted) resumeCtas(); else if (coreLoaded) startCore(); } else abandon(); } });
+    addEventListener('beforeunload', cancelRedirect);
+    addEventListener('pointerdown', cancelRedirect, {once:true, capture:true});
+    addEventListener('keydown', cancelRedirect, {once:true, capture:true});
+    addEventListener('click', cancelRedirect, {once:true, capture:true});
+    const routeChanged = () => {
+      if (location.pathname === initialPath && location.search === initialSearch) return;
+      cancelRedirect(); suspendCtas(); initialPath = location.pathname; initialSearch = location.search;
+      if (!abandoned && !suspended) { if (coreStarted) resumeCtas(); else if (coreLoaded) startCore(); }
+    };
+    addEventListener('popstate', routeChanged);
+    for (const method of ['pushState', 'replaceState']) {
+      const original = history[method];
+      history[method] = function (...args) {
+        const result = original.apply(this, args);
+        routeChanged();
+        return result;
+      };
+    }
+    // One delegated listener uses the latest bounded snapshot.
+    const ctaTtlMs = 120000, refreshIntervalMs = 60000;
+    let activeCtas = null, listenerInstalled = false, latestCtaVersion = 0;
+    const observeCtaVersion = decision => {
+      if (decision && decision.action === 'OBSERVE_ONLY' && Number.isSafeInteger(decision.ctaVersion) && decision.ctaVersion > latestCtaVersion) latestCtaVersion = decision.ctaVersion;
+    };
+    // Only explicitly configured public labels are copied; existing destination parameters win.
+    const attributed = (destination, rules) => {
+      const target = new URL(destination), permitted = rules && rules[destination];
+      if (!permitted || typeof permitted !== 'object' || Array.isArray(permitted) || location.search.length > 2048) return target.href;
+      const source = new URLSearchParams(location.search);
+      const protectedKeys = new Set(Array.from(target.searchParams.keys(), key => key.toLowerCase()));
+      for (const key of ['utm_source','utm_medium','utm_campaign','utm_content','utm_term']) {
+        const values = source.getAll(key), allow = permitted[key];
+        if (!protectedKeys.has(key) && values.length === 1 && Array.isArray(allow) && allow.includes(values[0])) target.searchParams.append(key, values[0]);
+      }
+      return target.href;
+    };
+    const reportAction = (receipt, marker, surface) => {
+      if (typeof receipt !== 'string') return;
+      try { const hex=Array.from(crypto.getRandomValues(new Uint8Array(16)),x=>x.toString(16).padStart(2,'0')).join(''); const event=[hex.slice(0,8),hex.slice(8,12),hex.slice(12,16),hex.slice(16,20),hex.slice(20)].join('-'); navigator.sendBeacon(endpoint('observed-action'), new Blob([JSON.stringify({receipt,event,marker,surface})],{type:'text/plain'})); } catch (_) { /* Observation never gates navigation. */ }
+    };
+    const operationalContextMatches = decision => {
+      const context=decision.operationalContext;
+      return context && location.protocol==='https:' && context.origin===location.origin && context.pathname===location.pathname && context.original!==location.origin;
+    };
+    const prepareCtas = (decision, startedWall, startedMono) => {
+      try {
+        if (!Number.isSafeInteger(decision.version) || decision.version < 1 || decision.version < latestCtaVersion || location.pathname !== decision.pathname || !Array.isArray(decision.mappings) || decision.mappings.length > 100) return;
+        const original = new URL(decision.original);
+        if (!['http:', 'https:'].includes(original.protocol) || original.origin !== decision.original || original.origin === location.origin || (!(['localhost','127.0.0.1'].includes(original.hostname) && ['localhost','127.0.0.1'].includes(location.hostname)) && !(operationalContextMatches(decision) && decision.operationalContext.original===original.origin))) return;
+        const mappings = new Map();
+        const external = decision.externalDestinations ?? [];
+        if (!Array.isArray(external) || external.length > 100 || external.some(url => typeof url !== 'string' || url.length > 2048)) return;
+        for (const row of decision.mappings) {
+          if (!row || typeof row.marker !== 'string' || !/^[a-zA-Z0-9_-]{8,64}$/.test(row.marker) || (row.surface !== undefined && (typeof row.surface !== 'string' || !/^[a-zA-Z0-9_-]{1,64}$/.test(row.surface))) || !['a','form'].includes(row.kind) || typeof row.destination !== 'string') return;
+          const target = new URL(row.destination);
+          if ((target.origin !== original.origin && (target.protocol !== 'https:' || !external.includes(target.href))) || target.username || target.password || target.hash || !['http:', 'https:'].includes(target.protocol)) return;
+          const entries = mappings.get(row.marker) || [];
+          if (entries.some(item => item.surface === row.surface)) return;
+          if (row.requiresSurface !== undefined && typeof row.requiresSurface !== 'boolean') return;
+          entries.push({surface:row.surface, requiresSurface:row.requiresSurface, kind:row.kind, destination:attributed(target.href, decision.attribution)}); mappings.set(row.marker, entries);
+        }
+        if (!validContext() || Date.now() < startedWall || Date.now() - startedWall > 5000 || performance.now() - startedMono > 5000) return;
+        latestCtaVersion = decision.version;
+        activeCtas = {receipt:decision.observationReceipt,mappings, pathname:decision.pathname, startedWall, startedMono};
+        if (!listenerInstalled) { listenerInstalled = true; install(); }
+      } catch (_) { /* Keep original links. */ }
+    };
+    const install = () => {
+          document.addEventListener('click', event => {
+            try {
+              if (!(event.target instanceof Element)) return;
+              const node = event.target.closest('a[data-anticlone-point][href]');
+              if (!node || !node.isConnected) return;
+              const activate = currentEvent => {
+                if (currentEvent !== event) return;
+                try {
+                  const snapshot = activeCtas;
+                  if (!snapshot || Date.now() < snapshot.startedWall || Date.now() - snapshot.startedWall >= ctaTtlMs || performance.now() - snapshot.startedMono >= ctaTtlMs) { activeCtas = null; return; }
+                  if (event.defaultPrevented || !validContext() || location.pathname !== snapshot.pathname || !node.isConnected || !node.hasAttribute('href')) return;
+                  const mappings = snapshot.mappings;
+                  const marker = node.getAttribute('data-anticlone-point');
+                  const entries = mappings.get(marker) || [];
+                  const scope = node.closest('[data-anticlone-surface]')?.getAttribute('data-anticlone-surface');
+                  const entry = scope ? entries.find(item => item.surface === scope) : entries.length === 1 && !entries[0].requiresSurface ? entries[0] : null;
+                  if (!entry || entry.kind !== 'a') return;
+                  const current = Array.from(document.querySelectorAll('[data-anticlone-point]'));
+                  if (current.length > 1000 || current.filter(item => item.getAttribute('data-anticlone-point') === marker && (!scope || item.closest('[data-anticlone-surface]')?.getAttribute('data-anticlone-surface') === scope)).length !== 1) return;
+                  const previous = node.getAttribute('href');
+                  const replacement = entry.destination;
+                  node.setAttribute('href', replacement);
+                  reportAction(snapshot.receipt, marker, entry.surface ?? null);
+                  setTimeout(() => { if (node.getAttribute('href') === replacement) node.setAttribute('href', previous); }, 0);
+                } catch (_) { /* Preserve the page on incompatible DOM implementations. */ }
+              };
+              node.addEventListener('click', activate, {capture:true, once:true});
+              setTimeout(() => node.removeEventListener('click', activate, true), 0);
+            } catch (_) { /* Preserve the page on incompatible DOM implementations. */ }
+          }, {capture:true});
+          // Preserve native form submission until cancellation and data safety can be guaranteed.
+    };
+    const core = document.createElement('script');
+    core.src = new URL(distribution?.paths?.['core.js'] ?? 'core.js', distribution ? distribution.bases.SCRIPT : source).href;
+    core.async = true;
+    startCore = () => {
+      if (!validContext()) return;
+      if (coreStarted) return;
+      coreStarted = true;
+      try {
+        let session = sessionStorage.getItem('anticlone.lab.session');
+        if (!session) { const bytes = crypto.getRandomValues(new Uint8Array(16)); session = Array.from(bytes, x => x.toString(16).padStart(2, '0')).join(''); sessionStorage.setItem('anticlone.lab.session', session); }
+        if (!/^[a-f0-9]{32}$/.test(session)) return;
+        const signals = {};
+        if (location.search.length <= 2048) {
+          const params = new URLSearchParams(location.search);
+          for (const key of ['gclid','fbclid','ttclid','msclkid']) { const values = params.getAll(key); if (values.length === 1 && /^[A-Za-z0-9._~-]{1,128}$/.test(values[0])) { signals.clickId = values[0]; signals.clickKey = key; break; } }
+          const media = params.getAll('utm_medium'); if (media.length === 1 && ['cpc','ppc','paid','paid_social'].includes(media[0].toLowerCase())) signals.medium = media[0].toLowerCase();
+        }
+        if (document.referrer && document.referrer.length <= 2048) { try { const ref = new URL(document.referrer); if (['http:','https:'].includes(ref.protocol) && !ref.username && !ref.password && /^[a-z0-9]+(?:[a-z0-9.-]*[a-z0-9])?$/.test(ref.hostname) && ref.hostname.length <= 253 && !ref.hostname.includes('..')) signals.referrerHost = ref.hostname.toLowerCase(); } catch (_) {} }
+        // Preserve the initial declared class inputs across reloads without storing raw click IDs.
+        if (signals.clickId) signals.clickId = 'present';
+        const stored = sessionStorage.getItem('anticlone.lab.attribution');
+        if (stored === null) sessionStorage.setItem('anticlone.lab.attribution', JSON.stringify(signals));
+        else { const initial = JSON.parse(stored); if (!initial || typeof initial !== 'object' || Array.isArray(initial)) return; Object.keys(signals).forEach(key => delete signals[key]); Object.assign(signals, initial); }
+        if (distribution || /\/i\/[a-f0-9-]{36}\/runtime\.js$/.test(new URL(source).pathname)) { try { navigator.sendBeacon(endpoint('observed-session'), new Blob([JSON.stringify({session,signals})],{type:'text/plain'})); } catch (_) { /* Passive metrics never block navigation. */ } }
+        let inFlight = false, sequence = 0, lastAttempt = Date.now(), backoff = refreshIntervalMs, failed = false, controller, returnTimer;
+        const expired = () => !activeCtas || Date.now() < activeCtas.startedWall || Date.now() - activeCtas.startedWall >= ctaTtlMs || performance.now() - activeCtas.startedMono >= ctaTtlMs;
+        const refresh = (onReturn = false, afterEntry = false) => {
+          const elapsed = Date.now() - lastAttempt;
+          if (!validContext() || document.hidden || inFlight || elapsed < 0) return;
+          const delay = failed ? backoff : onReturn && expired() ? 5000 : refreshIntervalMs;
+          if (!afterEntry && elapsed < delay) {
+            if (onReturn && expired() && !returnTimer) returnTimer = setTimeout(() => { returnTimer = undefined; refresh(true); }, delay - elapsed);
+            return;
+          }
+          if (returnTimer) { clearTimeout(returnTimer); returnTimer = undefined; }
+          inFlight = true; const id = ++sequence, wall = Date.now(), mono = performance.now(); lastAttempt = wall;
+          controller = new AbortController();
+          const requestController = controller, timeout = setTimeout(() => requestController.abort(), 5000);
+          fetch(endpoint('cta-refresh'), {method:'POST', headers:{'Content-Type':'text/plain'}, body:JSON.stringify({session,signals,pathname:initialPath}), cache:'no-store', signal:requestController.signal})
+            .then(response => { if (!response.ok) throw Error('unavailable'); return response.json(); })
+            .then(decision => { if (id !== sequence || !validContext()) return; failed = false; backoff = refreshIntervalMs; activeCtas = null; observeCtaVersion(decision); if (decision && decision.action === 'REPLACE_CONVERSION') prepareCtas(decision, wall, mono); })
+            .catch(() => { if (id === sequence) { activeCtas = null; failed = true; backoff = Math.min(backoff * 2, 240000); } })
+            .finally(() => { clearTimeout(timeout); if (id === sequence) { inFlight = false; controller = undefined; } });
+        };
+        suspendCtas = () => { activeCtas = null; ++sequence; if (controller) controller.abort(); if (returnTimer) clearTimeout(returnTimer); returnTimer = undefined; inFlight = false; controller = undefined; };
+        resumeCtas = () => refresh(true);
+        const timer = setInterval(() => refresh(), refreshIntervalMs);
+        addEventListener('pagehide', event => { if (!event.persisted) { clearInterval(timer); suspendCtas(); } });
+        document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(true); });
+        const entryWall = Date.now(), entryMono = performance.now(), entrySequence = sequence;
+        fetch(endpoint('entry-decision'), { method:'POST', headers:{'Content-Type':'text/plain'}, body:JSON.stringify({session,signals,pathname:initialPath}), cache: 'no-store' })
+          .then(response => { if (!response.ok) throw new Error('decision unavailable'); return response.json(); })
+          .then(decision => {
+            if (!validContext()) return;
+            if (entrySequence === sequence) observeCtaVersion(decision);
+            if (decision.action === 'REPLACE_CONVERSION') { releaseGate(); if (entrySequence === sequence) prepareCtas(decision, entryWall, entryMono); return; }
+            if (decision.action !== 'PAGE_REDIRECT') releaseGate();
+            if (!redirectPending || redirectInteracted || performance.now() >= deadline) {
+              if (decision.action === 'PAGE_REDIRECT' && entrySequence === sequence) refresh(false, true);
+              return;
+            }
+            redirectPending = false;
+            if (decision.action !== 'PAGE_REDIRECT' || !Number.isSafeInteger(decision.version) || decision.version < 1 || typeof decision.destination !== 'string') return;
+            if(decision.operationalContext && !operationalContextMatches(decision)) return;
+            const target = new URL(decision.destination);
+            if (!['http:', 'https:'].includes(target.protocol) || target.username || target.password || target.hash || target.href === location.href || target.origin === location.origin) return;
+            reportAction(decision.observationReceipt, null, null);
+            location.replace(attributed(target.href, decision.attribution));
+          }).catch(cancelRedirect);
+      } catch (_) { cancelRedirect(); }
+    };
+    core.onload = () => { coreLoaded = true; startCore(); };
+    core.onerror = cancelRedirect;
+    document.head.appendChild(core);
+  } catch (_) { /* Leave the page operational. */ }
+})();
